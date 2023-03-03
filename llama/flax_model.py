@@ -23,6 +23,7 @@ class RMSNorm(nn.Module):
         return output * self.weight
 
 # jax rotary embs
+# jax doesn't have imaginary data types (or does it?), so gptj splits the real and imaginary parts into 2 different dimensions on the same tensor
 # from gptj https://github.com/huggingface/transformers/blob/37e0974afcbccdc85da59d51b44e1437b6b3caea/src/transformers/models/gptj/modeling_flax_gptj.py#L109
 def create_sinusoidal_positions(num_pos, dim):
     inv_freq = 1.0 / (10000 ** (np.arange(0, dim, 2) / dim))

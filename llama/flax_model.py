@@ -114,22 +114,25 @@ class Attention(nn.Module):
 
         xq, xk = apply_rotary_emb(xq, xk, freqs_cis=freqs_cis)
 
+        # import IPython; IPython.embed()
+
         self.cache_k.value = self.cache_k.value.at[:bsz, start_pos:(start_pos+seqlen)].set(xk)
         self.cache_v.value = self.cache_v.value.at[:bsz, start_pos:(start_pos+seqlen)].set(xv)
 
         keys = self.cache_k.value[:bsz, :(start_pos+seqlen)]
         values = self.cache_v.value[:bsz, :(start_pos+seqlen)]
+        # keys = xk
+        # values = xv
 
         xq = jnp.transpose(xq, axes=(0, 2, 1, 3))
         keys = jnp.transpose(keys, axes=(0, 2, 1, 3))
         values = jnp.transpose(values, axes=(0, 2, 1, 3))
-        scores = jnp.matmul(xq, jnp.transpose(keys, axes=(0, 1, 3, 2))) / math.sqrt(self.head_dim)
+        scores = jnp.matmul(xq, jnp.transpose(keys, axes=(0, 1, 3, 2)), precision='bfloat16') / math.sqrt(self.head_dim)
         if mask is not None:
             scores = scores + mask  # (bs, n_heads, slen, cache_len + slen)
         scores = jax.nn.softmax(scores.astype(self.dtype), axis=-1).astype(self.dtype)
         output = jnp.matmul(scores, values)  # (bs, n_heads, slen, head_dim)
         output = jnp.transpose(output, axes=(0, 2, 1, 3)).reshape(bsz, seqlen, -1)
-
         return self.wo(output)
 
 class FeedForward(nn.Module):

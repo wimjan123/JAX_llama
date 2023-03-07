@@ -27,7 +27,7 @@ class ModelArgs:
     norm_eps: float = 1e-5
 
     max_batch_size: int = 32
-    max_seq_len: int = 1024
+    max_seq_len: int = 2048
 
 
 class RMSNorm(torch.nn.Module):
@@ -146,7 +146,6 @@ class Attention(nn.Module):
         output = output.transpose(
             1, 2
         ).contiguous().view(bsz, seqlen, -1)
-
         return self.wo(output)
 
 

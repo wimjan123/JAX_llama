@@ -1,6 +1,4 @@
 import re
-import jax.numpy as jnp
-import jax.random as random
 from flax.core.frozen_dict import freeze
 from flax.traverse_util import flatten_dict, unflatten_dict
 from jax.sharding import PartitionSpec as P

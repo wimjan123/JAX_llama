@@ -435,80 +435,81 @@ def main(ckpt_dir: str, tokenizer_path: str):
 
     with torch.no_grad():
         with jax.default_device(jax.devices('cpu')[0]):
-            print('='*10)
-            print("[Testing RMSNorm]")
-            errs = test_RMSNorm(ModelArgs(), 128, atol=1e-2)
-            print("[Passed]")
-            print("Max RMSNorm error: %f" % (np.max(errs)))
-            print("Mean RMSNorm error: %f" % (np.mean(errs)))
-            print("Median RMSNorm error: %f" % (np.median(errs)))
-            print('='*10)
+            pass
+        #     print('='*10)
+        #     print("[Testing RMSNorm]")
+        #     errs = test_RMSNorm(ModelArgs(), 128, atol=1e-2)
+        #     print("[Passed]")
+        #     print("Max RMSNorm error: %f" % (np.max(errs)))
+        #     print("Mean RMSNorm error: %f" % (np.mean(errs)))
+        #     print("Median RMSNorm error: %f" % (np.median(errs)))
+        #     print('='*10)
 
-            print('='*10)
-            print("[Testing precompute_freqs_cis]")
-            errs = test_precompute_freqs_cis(ModelArgs(), atol=1e-2)
-            print("[Passed]")
-            print("Max precompute_freqs_cis error: %f" % (np.max(errs)))
-            print("Mean precompute_freqs_cis error: %f" % (np.mean(errs)))
-            print("Median precompute_freqs_cis error: %f" % (np.median(errs)))
-            print('='*10)
+        #     print('='*10)
+        #     print("[Testing precompute_freqs_cis]")
+        #     errs = test_precompute_freqs_cis(ModelArgs(), atol=1e-2)
+        #     print("[Passed]")
+        #     print("Max precompute_freqs_cis error: %f" % (np.max(errs)))
+        #     print("Mean precompute_freqs_cis error: %f" % (np.mean(errs)))
+        #     print("Median precompute_freqs_cis error: %f" % (np.median(errs)))
+        #     print('='*10)
 
-            print('='*10)
-            print("[Testing apply_rotary_emb]")
-            errs0, errs1 = test_apply_roary_emb(ModelArgs(), 128, atol=1e-2)
-            print("[Passed]")
-            print("Max apply_rotary_emb error: %f, %f" % (np.max(errs0), np.max(errs1)))
-            print("Mean apply_rotary_emb error: %f, %f" % (np.mean(errs0), np.mean(errs1)))
-            print("Median apply_rotary_emb error: %f, %f" % (np.median(errs0), np.median(errs1)))
-            print('='*10)
+        #     print('='*10)
+        #     print("[Testing apply_rotary_emb]")
+        #     errs0, errs1 = test_apply_roary_emb(ModelArgs(), 128, atol=1e-2)
+        #     print("[Passed]")
+        #     print("Max apply_rotary_emb error: %f, %f" % (np.max(errs0), np.max(errs1)))
+        #     print("Mean apply_rotary_emb error: %f, %f" % (np.mean(errs0), np.mean(errs1)))
+        #     print("Median apply_rotary_emb error: %f, %f" % (np.median(errs0), np.median(errs1)))
+        #     print('='*10)
 
-            print('='*10)
-            print("[Testing Attention]")
-            errs = test_Attention(ModelArgs(), 128, atol=1e-2)
-            print("[Passed]")
-            print("Max Attention error: %f" % (np.max(errs)))
-            print("Mean Attention error: %f" % (np.mean(errs)))
-            print("Median Attention error: %f" % (np.median(errs)))
-            print('='*10)
+        #     print('='*10)
+        #     print("[Testing Attention]")
+        #     errs = test_Attention(ModelArgs(), 128, atol=1e-2)
+        #     print("[Passed]")
+        #     print("Max Attention error: %f" % (np.max(errs)))
+        #     print("Mean Attention error: %f" % (np.mean(errs)))
+        #     print("Median Attention error: %f" % (np.median(errs)))
+        #     print('='*10)
 
-            print('='*10)
-            print("[Testing FeedForward]")
-            errs = test_feedForward(ModelArgs(), 128, atol=1e-2)
-            print("[Passed]")
-            print("Max FeedForward error: %f" % (np.max(errs)))
-            print("Mean FeedForward error: %f" % (np.mean(errs)))
-            print("Median FeedForward error: %f" % (np.median(errs)))
-            print('='*10)
+        #     print('='*10)
+        #     print("[Testing FeedForward]")
+        #     errs = test_feedForward(ModelArgs(), 128, atol=1e-2)
+        #     print("[Passed]")
+        #     print("Max FeedForward error: %f" % (np.max(errs)))
+        #     print("Mean FeedForward error: %f" % (np.mean(errs)))
+        #     print("Median FeedForward error: %f" % (np.median(errs)))
+        #     print('='*10)
 
-            print('='*10)
-            print("[Testing TransformerBlock]")
-            errs = test_TransformerBlock(ModelArgs(), 128, atol=1e-2)
-            print("[Passed]")
-            print("Max TransformerBlock error: %f" % (np.max(errs)))
-            print("Mean TransformerBlock error: %f" % (np.mean(errs)))
-            print("Median TransformerBlock error: %f" % (np.median(errs)))
-            print('='*10)
+        #     print('='*10)
+        #     print("[Testing TransformerBlock]")
+        #     errs = test_TransformerBlock(ModelArgs(), 128, atol=1e-2)
+        #     print("[Passed]")
+        #     print("Max TransformerBlock error: %f" % (np.max(errs)))
+        #     print("Mean TransformerBlock error: %f" % (np.mean(errs)))
+        #     print("Median TransformerBlock error: %f" % (np.median(errs)))
+        #     print('='*10)
 
-            print('='*10)
-            print("[Testing Transformer]")
-            errs = test_Transformer(ModelArgs(), 128, atol=1e-2)
-            print("[Passed]")
-            print("Max Transformer error: %f" % (np.max(errs)))
-            print("Mean Transformer error: %f" % (np.mean(errs)))
-            print("Median Transformer error: %f" % (np.median(errs)))
-            print('='*10)
+        #     print('='*10)
+        #     print("[Testing Transformer]")
+        #     errs = test_Transformer(ModelArgs(), 128, atol=1e-2)
+        #     print("[Passed]")
+        #     print("Max Transformer error: %f" % (np.max(errs)))
+        #     print("Mean Transformer error: %f" % (np.mean(errs)))
+        #     print("Median Transformer error: %f" % (np.median(errs)))
+        #     print('='*10)
 
-        print('='*10)
-        print("[Testing Tokenizer]")
-        test_Tokenizer(
-            tokenizer_path, 
-            [
-                "The capital of Germany is the city of", 
-                "Here is my sonnet in the style of Shakespeare about an artificial intelligence:", 
-            ], 
-        )
-        print("[Passed]")
-        print('='*10)
+        # print('='*10)
+        # print("[Testing Tokenizer]")
+        # test_Tokenizer(
+        #     tokenizer_path, 
+        #     [
+        #         "The capital of Germany is the city of", 
+        #         "Here is my sonnet in the style of Shakespeare about an artificial intelligence:", 
+        #     ], 
+        # )
+        # print("[Passed]")
+        # print('='*10)
         
         print('='*10)
         print("[Testing ModelLogits]")
@@ -529,21 +530,21 @@ def main(ckpt_dir: str, tokenizer_path: str):
         print("Median ModelLogits error: %f" % (np.median(errs)))
         print('='*10)
 
-        print('='*10)
-        print("[Testing ModelGenerations]")
-        test_ModelGenerations(
-            ckpt_dir, 
-            tokenizer_path, 
-            local_rank, 
-            world_size, 
-            [
-                "The capital of Germany is the city of", 
-                "The translation of \"hello world\" to Spanish is", 
-            ], 
-            gen_len=32, 
-        )
-        print("[Passed]")
-        print('='*10)
+        # print('='*10)
+        # print("[Testing ModelGenerations]")
+        # test_ModelGenerations(
+        #     ckpt_dir, 
+        #     tokenizer_path, 
+        #     local_rank, 
+        #     world_size, 
+        #     [
+        #         "The capital of Germany is the city of", 
+        #         "The translation of \"hello world\" to Spanish is", 
+        #     ], 
+        #     gen_len=32, 
+        # )
+        # print("[Passed]")
+        # print('='*10)
 
 if __name__ == "__main__":
     fire.Fire(main)

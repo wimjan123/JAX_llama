@@ -1,5 +1,5 @@
 from functools import partial
-from typing import Optional, Tuple
+from typing import Optional, Tuple, Union
 
 import flax.linen as nn
 import jax
@@ -16,7 +16,7 @@ from transformers.modeling_flax_outputs import FlaxBaseModelOutput, FlaxCausalLM
 from transformers.modeling_flax_utils import ACT2FN, FlaxPreTrainedModel, append_call_sample_docstring
 from transformers.utils import add_start_docstrings, add_start_docstrings_to_model_forward, logging
 
-from llama.transformers_config import LLaMAConfig
+from jax_llama.config import LLaMAConfig
 import math
 
 remat = nn_partitioning.remat
@@ -45,10 +45,10 @@ class RMSNorm(nn.Module):
         weight = jnp.asarray(self.weight, self.dtype)
         return output * weight
 
-def precompute_freqs_cis(dim: int, end: int, theta: float=10000.0) -> jnp.ndarray:
-    freqs = 1.0 / (theta ** (np.arange(0, dim, 2)[: (dim // 2)].astype(np.float32) / dim))
+def precompute_freqs_cis(dim: int, end: int, theta: float=10000.0, dtype: jnp.dtype=jnp.float32) -> jnp.ndarray:
+    freqs = 1.0 / (theta ** (np.arange(0, dim, 2)[: (dim // 2)].astype(dtype) / dim))
     t = np.arange(end)  # type: ignore
-    freqs = np.outer(t, freqs).astype(np.float32)  # type: ignore
+    freqs = np.outer(t, freqs).astype(dtype)  # type: ignore
     sin, cos = np.sin(freqs), np.cos(freqs)
     freqs_cis = np.complex64(cos + 1j * sin)
     return jnp.asarray(freqs_cis)
@@ -57,10 +57,11 @@ def apply_rotary_emb(
     xq: jnp.ndarray, 
     xk: jnp.ndarray, 
     freqs_cis: jnp.ndarray, 
+    dtype: jnp.dtype=jnp.float32, 
 ) -> Tuple[jnp.ndarray, jnp.ndarray]:
     
-    reshape_xq = xq.astype(jnp.float32).reshape(*xq.shape[:-1], -1, 2)
-    reshape_xk = xk.astype(jnp.float32).reshape(*xk.shape[:-1], -1, 2)
+    reshape_xq = xq.astype(dtype).reshape(*xq.shape[:-1], -1, 2)
+    reshape_xk = xk.astype(dtype).reshape(*xk.shape[:-1], -1, 2)
     
     xq_ = jax.lax.complex(reshape_xq[..., 0], reshape_xq[..., 1])
     xk_ = jax.lax.complex(reshape_xk[..., 0], reshape_xk[..., 1])
@@ -80,6 +81,7 @@ class FlaxLLaMAAttention(nn.Module):
     config: LLaMAConfig
     dtype: jnp.dtype=jnp.float32
     param_dtype: jnp.dtype=jnp.float32
+    precision: Optional[Union[jax.lax.Precision, str]]=None
 
     def setup(self):
         config = self.config
@@ -93,6 +95,7 @@ class FlaxLLaMAAttention(nn.Module):
             param_dtype=self.param_dtype, 
             use_bias=False, 
             kernel_init=jax.nn.initializers.normal(self.config.initializer_range), 
+            precision=self.precision, 
         )
         self.wk = nn.Dense(
             config.num_attention_heads*self.head_dim, 
@@ -100,6 +103,7 @@ class FlaxLLaMAAttention(nn.Module):
             param_dtype=self.param_dtype, 
             use_bias=False, 
             kernel_init=jax.nn.initializers.normal(self.config.initializer_range), 
+            precision=self.precision, 
         )
         self.wv = nn.Dense(
             config.num_attention_heads*self.head_dim, 
@@ -107,6 +111,7 @@ class FlaxLLaMAAttention(nn.Module):
             param_dtype=self.param_dtype, 
             use_bias=False, 
             kernel_init=jax.nn.initializers.normal(self.config.initializer_range), 
+            precision=self.precision, 
         )
         self.wo = nn.Dense(
             config.hidden_size, 
@@ -114,6 +119,7 @@ class FlaxLLaMAAttention(nn.Module):
             param_dtype=self.param_dtype, 
             use_bias=False, 
             kernel_init=jax.nn.initializers.normal(self.config.initializer_range), 
+            precision=self.precision, 
         )
 
         self.resid_dropout = nn.Dropout(rate=config.resid_pdrop)
@@ -123,6 +129,7 @@ class FlaxLLaMAAttention(nn.Module):
         self.freqs_cis = precompute_freqs_cis(
             self.head_dim, 
             config.max_sequence_length * 2, 
+            dtype=self.dtype, 
         )
     
     def _split_heads(self, hidden_states):
@@ -180,7 +187,7 @@ class FlaxLLaMAAttention(nn.Module):
 
         freqs_cis = jnp.take(self.freqs_cis, position_ids, axis=0)
 
-        xq, xk = apply_rotary_emb(xq, xk, freqs_cis=freqs_cis)
+        xq, xk = apply_rotary_emb(xq, xk, freqs_cis=freqs_cis, dtype=self.dtype)
 
         query_length, key_length = xq.shape[1], xk.shape[1]
         
@@ -219,15 +226,15 @@ class FlaxLLaMAAttention(nn.Module):
         attn_weights = dot_product_attention_weights(
             xq, 
             xk, 
-            bias=attention_bias,
-            dropout_rng=dropout_rng,
-            dropout_rate=self.config.attn_pdrop,
-            deterministic=deterministic,
-            dtype=self.dtype,
-            precision=None,
+            bias=attention_bias, 
+            dropout_rng=dropout_rng, 
+            dropout_rate=self.config.attn_pdrop, 
+            deterministic=deterministic, 
+            dtype=self.dtype, 
+            precision=self.precision, 
         )
 
-        attn_output = jnp.einsum("...hqk,...khd->...qhd", attn_weights, xv)
+        attn_output = jnp.einsum("...hqk,...khd->...qhd", attn_weights, xv, precision=self.precision)
         attn_output = self._merge_heads(attn_output)
         attn_output = self.wo(attn_output)
         attn_output = self.resid_dropout(attn_output, deterministic=deterministic)
@@ -239,6 +246,7 @@ class FlaxLLaMAMLP(nn.Module):
     config: LLaMAConfig
     dtype: jnp.dtype=jnp.float32
     param_dtype: jnp.dtype=jnp.float32
+    precision: Optional[Union[jax.lax.Precision, str]]=None
 
     def setup(self) -> None:
         config = self.config
@@ -249,6 +257,7 @@ class FlaxLLaMAMLP(nn.Module):
             param_dtype=self.param_dtype, 
             use_bias=False, 
             kernel_init=jax.nn.initializers.normal(self.config.initializer_range), 
+            precision=self.precision, 
         )
         self.w2 = nn.Dense(
             config.hidden_size, 
@@ -256,6 +265,7 @@ class FlaxLLaMAMLP(nn.Module):
             param_dtype=self.param_dtype, 
             use_bias=False, 
             kernel_init=jax.nn.initializers.normal(self.config.initializer_range), 
+            precision=self.precision, 
         )
         self.w3 = nn.Dense(
             config.intermediate_size, 
@@ -263,6 +273,7 @@ class FlaxLLaMAMLP(nn.Module):
             param_dtype=self.param_dtype, 
             use_bias=False, 
             kernel_init=jax.nn.initializers.normal(self.config.initializer_range), 
+            precision=self.precision, 
         )
         self.dropout = nn.Dropout(rate=self.config.resid_pdrop)
 
@@ -275,29 +286,32 @@ class FlaxLLaMABlock(nn.Module):
     config: LLaMAConfig
     dtype: jnp.dtype=jnp.float32
     param_dtype: jnp.dtype=jnp.float32
+    precision: Optional[Union[jax.lax.Precision, str]]=None
 
     def setup(self) -> None:
         self.attention = FlaxLLaMAAttention(
             self.config, 
             dtype=self.dtype, 
-            param_dtype=self.param_dtype
+            param_dtype=self.param_dtype, 
+            precision=self.precision, 
         )
         self.feed_forward = FlaxLLaMAMLP(
             self.config, 
             dtype=self.dtype, 
             param_dtype=self.param_dtype, 
+            precision=self.precision, 
         )
         self.attention_norm = RMSNorm(
             self.config.hidden_size, 
             eps=self.config.rms_norm_eps, 
             dtype=self.dtype, 
-            param_dtype=self.param_dtype
+            param_dtype=self.param_dtype, 
         )
         self.ffn_norm = RMSNorm(
             self.config.hidden_size, 
             eps=self.config.rms_norm_eps, 
             dtype=self.dtype, 
-            param_dtype=self.param_dtype
+            param_dtype=self.param_dtype, 
         )
     
     def __call__(
@@ -478,6 +492,7 @@ class FlaxLLaMABlockCollection(nn.Module):
     config: LLaMAConfig
     dtype: jnp.dtype = jnp.float32
     param_dtype: jnp.dtype=jnp.float32
+    precision: Optional[Union[jax.lax.Precision, str]]=None
 
     def setup(self):
         block = FlaxLLaMABlock
@@ -485,7 +500,7 @@ class FlaxLLaMABlockCollection(nn.Module):
             FlaxLLaMACheckpointBlock = remat(block, static_argnums=(3, 4, 5))
             block = FlaxLLaMACheckpointBlock
         self.blocks = [
-            block(self.config, name=str(i), dtype=self.dtype, param_dtype=self.param_dtype) for i in range(self.config.num_hidden_layers)
+            block(self.config, name=str(i), dtype=self.dtype, param_dtype=self.param_dtype, precision=self.precision) for i in range(self.config.num_hidden_layers)
         ]
 
     def __call__(
@@ -507,12 +522,12 @@ class FlaxLLaMABlockCollection(nn.Module):
                 all_hidden_states += (hidden_states,)
 
             layer_outputs = block(
-                hidden_states,
-                attention_mask,
-                position_ids=position_ids,
-                deterministic=deterministic,
-                init_cache=init_cache,
-                output_attentions=output_attentions,
+                hidden_states, 
+                attention_mask, 
+                position_ids, 
+                deterministic, 
+                init_cache, 
+                output_attentions, 
             )
             hidden_states = layer_outputs[0]
 
@@ -528,6 +543,7 @@ class FlaxLLaMAModule(nn.Module):
     config: LLaMAConfig
     dtype: jnp.dtype = jnp.float32
     param_dtype: jnp.dtype=jnp.float32
+    precision: Optional[Union[jax.lax.Precision, str]]=None
 
     def setup(self):
         self.embed_dim = self.config.hidden_size
@@ -540,7 +556,7 @@ class FlaxLLaMAModule(nn.Module):
             param_dtype=self.param_dtype, 
         )
         self.dropout = nn.Dropout(rate=self.config.embd_pdrop)
-        self.h = FlaxLLaMABlockCollection(self.config, dtype=self.dtype, param_dtype=self.param_dtype)
+        self.h = FlaxLLaMABlockCollection(self.config, dtype=self.dtype, param_dtype=self.param_dtype, precision=self.precision)
         self.ln_f = RMSNorm(self.config.hidden_size, eps=self.config.rms_norm_eps, dtype=self.dtype, param_dtype=self.param_dtype)
 
     def __call__(
@@ -603,15 +619,17 @@ class FlaxLLaMAForCausalLMModule(nn.Module):
     config: LLaMAConfig
     dtype: jnp.dtype = jnp.float32
     param_dtype: jnp.dtype=jnp.float32
+    precision: Optional[Union[jax.lax.Precision, str]]=None
 
     def setup(self):
         self.transformer = FlaxLLaMAModule(self.config, dtype=self.dtype)
         self.lm_head = nn.Dense(
-            self.config.vocab_size,
-            dtype=self.dtype,
+            self.config.vocab_size, 
+            dtype=self.dtype, 
             param_dtype=self.param_dtype, 
             use_bias=False, 
-            kernel_init=jax.nn.initializers.normal(stddev=self.config.initializer_range),
+            kernel_init=jax.nn.initializers.normal(stddev=self.config.initializer_range), 
+            precision=self.precision, 
         )
 
     def __call__(

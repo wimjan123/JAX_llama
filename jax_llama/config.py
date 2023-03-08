@@ -78,9 +78,9 @@ class LLaMAConfig(PretrainedConfig):
         rms_norm_eps=1e-6,
         initializer_range=0.02,
         use_cache=True,
-        # pad_token_id=-1,
-        bos_token_id=0,
-        eos_token_id=1,
+        pad_token_id=-1,
+        bos_token_id=1,
+        eos_token_id=2,
         resid_pdrop=0.0,
         embd_pdrop=0.0,
         attn_pdrop=0.0,
@@ -102,7 +102,7 @@ class LLaMAConfig(PretrainedConfig):
         self.attn_pdrop = attn_pdrop
         self.gradient_checkpointing = gradient_checkpointing
         super().__init__(
-            # pad_token_id=pad_token_id,
+            pad_token_id=pad_token_id,
             bos_token_id=bos_token_id,
             eos_token_id=eos_token_id,
             tie_word_embeddings=tie_word_embeddings,

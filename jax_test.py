@@ -1,20 +1,26 @@
 import jax
 import jax.numpy as jnp
-from llama import transformers_flax_model, transformers_config, model
+from jax_llama import model as jax_model
+from jax_llama import config
+from llama import model
 import torch
 import numpy as np
 from fairscale.nn.model_parallel.initialize import initialize_model_parallel
 from typing import Tuple, List, Tuple
 import os
-from flax.core.frozen_dict import unfreeze, freeze
+from flax.core.frozen_dict import freeze
 from dataclasses import dataclass
 import functools
-from example import load
-from convert_weights import convert_llama_weights
+from example import load as torch_load
+from jax_example import load as jax_load
 from flax.linen import make_causal_mask
-
-## TODO:
-# assert device
+from jax_llama.tokenizer import LLaMATokenizer
+from llama.tokenizer import Tokenizer
+from jax_llama.partition import with_named_sharding_constraint
+from jax.sharding import PartitionSpec as P
+import fire
+os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
+os.environ["XLA_PYTHON_CLIENT_ALLOCATOR"] = "platform"
 
 @dataclass
 class ModelArgs:
@@ -27,10 +33,10 @@ class ModelArgs:
     max_batch_size: int = 1
     max_seq_len: int = 64
 
-    def transformers_config(self) -> transformers_config.LLaMAConfig:
+    def transformers_config(self) -> config.LLaMAConfig:
         intermediate_size = int(2 * (self.dim * 4) / 3)
         intermediate_size = self.multiple_of * ((intermediate_size + self.multiple_of - 1) // self.multiple_of)
-        return transformers_config.LLaMAConfig(
+        return config.LLaMAConfig(
             vocab_size=self.vocab_size, 
             hidden_size=self.dim, 
             intermediate_size=intermediate_size, 
@@ -58,7 +64,7 @@ def test_RMSNorm(args: ModelArgs, total_tests: int, atol: float) -> np.ndarray:
     for test_n in range(total_tests):
         x = np.random.randn(args.max_batch_size, args.dim).astype(np.float32)
 
-        jax_rms_norm = transformers_flax_model.RMSNorm(args.dim, eps=args.norm_eps)
+        jax_rms_norm = jax_model.RMSNorm(args.dim, eps=args.norm_eps)
         jax_params = jax_rms_norm.init(jax.random.PRNGKey(0), jnp.ones(args.dim, dtype=jnp.float32))['params']
         jax_output = jax_rms_norm.apply({'params': jax_params}, jnp.asarray(x))
         jax_output = np.asarray(jax_output)
@@ -72,7 +78,7 @@ def test_RMSNorm(args: ModelArgs, total_tests: int, atol: float) -> np.ndarray:
     return np.asarray(errs, dtype=np.float32)
 
 def test_precompute_freqs_cis(args: ModelArgs, atol: float) -> float:
-    jax_freqs_cis = transformers_flax_model.precompute_freqs_cis(args.dim // args.n_heads, args.max_seq_len)
+    jax_freqs_cis = jax_model.precompute_freqs_cis(args.dim // args.n_heads, args.max_seq_len)
     jax_freqs_cis = np.asarray(jax_freqs_cis)
 
     torch_freqs_cis = model.precompute_freqs_cis(args.dim // args.n_heads, args.max_seq_len)
@@ -87,8 +93,8 @@ def test_apply_roary_emb(args: ModelArgs, total_tests: int, atol: float) -> Tupl
         xq = np.random.randn(args.max_batch_size, args.max_seq_len, args.n_heads, args.dim // args.n_heads).astype(np.float32)
         xk = np.random.randn(args.max_batch_size, args.max_seq_len, args.n_heads, args.dim // args.n_heads).astype(np.float32)
 
-        jax_freqs_cis = transformers_flax_model.precompute_freqs_cis(args.dim // args.n_heads, args.max_seq_len)
-        jax_output = transformers_flax_model.apply_rotary_emb(jnp.asarray(xq), jnp.asarray(xk), jax_freqs_cis[None])
+        jax_freqs_cis = jax_model.precompute_freqs_cis(args.dim // args.n_heads, args.max_seq_len)
+        jax_output = jax_model.apply_rotary_emb(jnp.asarray(xq), jnp.asarray(xk), jax_freqs_cis[None])
         jax_output = (np.asarray(jax_output[0]), np.asarray(jax_output[1]))
 
         torch_freqs_cis = model.precompute_freqs_cis(args.dim // args.n_heads, args.max_seq_len)
@@ -110,7 +116,7 @@ def test_Attention(args: ModelArgs, total_tests: int, atol: float) -> float:
         wv = np.random.randn(args.dim, args.dim).astype(np.float32)
         wo = np.random.randn(args.dim, args.dim).astype(np.float32)
 
-        jax_attention = transformers_flax_model.FlaxLLaMAAttention(args.transformers_config())
+        jax_attention = jax_model.FlaxLLaMAAttention(args.transformers_config(), precision='highest')
         jax_params = freeze({
             'wq': {'kernel': jnp.asarray(wq)}, 
             'wk': {'kernel': jnp.asarray(wk)}, 
@@ -162,7 +168,7 @@ def test_feedForward(args: ModelArgs, total_tests: int, atol: float) -> List[flo
         w2 = np.random.randn(transformers_config.intermediate_size, args.dim).astype(np.float32)
         w3 = np.random.randn(args.dim, transformers_config.intermediate_size).astype(np.float32)
 
-        jax_mlp = transformers_flax_model.FlaxLLaMAMLP(transformers_config)
+        jax_mlp = jax_model.FlaxLLaMAMLP(transformers_config, precision='highest')
         jax_params = freeze({
             'w1': {'kernel': jnp.asarray(w1)}, 
             'w2': {'kernel': jnp.asarray(w2)}, 
@@ -203,7 +209,7 @@ def test_TransformerBlock(args: ModelArgs, total_tests: int, atol: float) -> np.
         attention_norm_scale = np.random.randn(args.dim).astype(np.float32)
         ffn_norm_scale = np.random.randn(args.dim).astype(np.float32)
 
-        jax_transformer_block = transformers_flax_model.FlaxLLaMABlock(transformers_config)
+        jax_transformer_block = jax_model.FlaxLLaMABlock(transformers_config, precision='highest')
         jax_params = freeze({
             'attention': {
                 'wq': {'kernel': jnp.asarray(wq)}, 
@@ -289,7 +295,7 @@ def test_Transformer(args: ModelArgs, total_tests: int, atol: float) -> np.ndarr
         norm = np.random.randn(args.dim).astype(np.float32)
         output = np.random.randn(args.dim, args.vocab_size).astype(np.float32)
 
-        jax_transformer = transformers_flax_model.FlaxLLaMAForCausalLMModule(transformers_config)
+        jax_transformer = jax_model.FlaxLLaMAForCausalLMModule(transformers_config, precision='highest')
         jax_params = freeze({
             'transformer': {
                 'wte': {'embedding': jnp.asarray(tok_embeddings)}, 
@@ -342,15 +348,96 @@ def test_Transformer(args: ModelArgs, total_tests: int, atol: float) -> np.ndarr
         errs.append(np.max(np.abs(jax_output - torch_output)))
     return np.asarray(errs, dtype=np.float32)
 
-if __name__ == "__main__":
+def test_Tokenizer(tokenizer_path: str, test_strs: List[str]) -> None:
+    jax_tokenizer = LLaMATokenizer(tokenizer_path)
+    torch_tokenizer = Tokenizer(tokenizer_path)
+    for str_ in test_strs:
+        jax_tokens = jax_tokenizer.encode(str_)
+        torch_tokens = torch_tokenizer.encode(str_, bos=True, eos=False)
+        assert jax_tokens == torch_tokens, f"Tokenizer test failed for string: {str_}"
+        assert jax_tokenizer.decode(jax_tokens) == torch_tokenizer.decode(torch_tokens), f"Tokenizer test failed for string: {str_}"
+
+def test_ModelLogits(ckpt_dir: str, tokenizer_path: str, local_rank: int, world_size: int, test_strs: List[str], atol: float) -> float:
+    assert torch.cuda.is_available(), "CUDA is not available."
+    assert jax.lib.xla_bridge.get_backend().platform == "gpu"
+
+    # load jax model
+    jax_generator = jax_load(ckpt_dir, tokenizer_path, precision='highest')
+    jax_model, jax_params = jax_generator.model, jax_generator.params
+    tokenizer, mesh = jax_generator.tokenizer, jax_generator.mesh
+    tokens = [tokenizer.encode(x) for x in test_strs]
+
+    # jit model call
+    @jax.jit
+    def get_logits(params: jnp.ndarray, tokens: jnp.ndarray) -> jnp.ndarray:
+        tokens = with_named_sharding_constraint(tokens, mesh, P("dp", None))
+
+        logits = jax_model(
+            in_array, 
+            params=params, 
+        ).logits[:, -1, :]
+
+        logits = with_named_sharding_constraint(logits, mesh, P("dp", None))
+        return logits
+
+    # get logits
+    jax_logits = []
+    for k in range(len(tokens)):
+        in_array = jnp.asarray(tokens[k][:jax_model.config.max_sequence_length])[None]
+        jax_logits.append(get_logits(jax_params, in_array))
+    jax_logits = np.asarray(jnp.concatenate(jax_logits, axis=0))
+    # unload jax model
+    max_seq_len = jax_model.config.max_sequence_length
+    del jax_model
+    del jax_params
+    del get_logits
+    
+    # get pytorch logits
+    torch_generator = torch_load(ckpt_dir, tokenizer_path, local_rank, world_size, max_seq_len=max_seq_len, max_batch_size=1)
+    torch_model, tokenizer = torch_generator.model, torch_generator.tokenizer
+    tokens = [tokenizer.encode(x, bos=True, eos=False) for x in test_strs]
+    torch_logits = []
+    for k in range(len(tokens)):
+        in_array = torch.tensor(tokens[k][:torch_model.params.max_seq_len]).long().cuda().unsqueeze(0)
+        torch_logits.append(torch_model.forward(in_array, 0))
+    torch_logits = torch.cat(torch_logits, dim=0).detach().cpu().numpy()
+    # unload pytorch model
+    del torch_generator
+    del torch_model
+
+    assert np.allclose(jax_logits, torch_logits, atol=atol), "ModelLogits test failed"
+
+    return np.max(np.abs(jax_logits - torch_logits).reshape(len(test_strs), -1), axis=1)
+
+def test_ModelGenerations(ckpt_dir: str, tokenizer_path: str, local_rank: int, world_size: int, test_strs: List[str], gen_len: int=32) -> None:
+    assert torch.cuda.is_available(), "CUDA is not available."
+    assert jax.lib.xla_bridge.get_backend().platform == "gpu"
+    
+    # load jax model
+    jax_generator = jax_load(ckpt_dir, tokenizer_path, precision='highest')
+    jax_strs = jax_generator.generate_from_str(test_strs, max_gen_len=gen_len, temperature=0.0, top_p=1.0)
+    # unload jax model
+    max_seq_len = jax_generator.model.config.max_sequence_length
+    del jax_generator
+
+    # get pytorch strs
+    torch_generator = torch_load(ckpt_dir, tokenizer_path, local_rank, world_size, max_seq_len=max_seq_len, max_batch_size=len(test_strs))
+    torch_strs = torch_generator.generate(test_strs, max_gen_len=gen_len, temperature=0.0, top_p=1.0)
+    # unload pytorch model
+    del torch_generator.model
+    del torch_generator
+
+    assert all([jax_strs[i] == torch_strs[i] for i in range(len(test_strs))]), "ModelGenerations test failed"
+
+def main(ckpt_dir: str, tokenizer_path: str):
     np.random.seed(0)
     local_rank, world_size = setup_model_parallel()
 
-    with jax.default_device(jax.devices('cpu')[0]):
-        with torch.no_grad():
+    with torch.no_grad():
+        with jax.default_device(jax.devices('cpu')[0]):
             print('='*10)
             print("[Testing RMSNorm]")
-            errs = test_RMSNorm(ModelArgs(), 128, atol=1000.0)
+            errs = test_RMSNorm(ModelArgs(), 128, atol=1e-2)
             print("[Passed]")
             print("Max RMSNorm error: %f" % (np.max(errs)))
             print("Mean RMSNorm error: %f" % (np.mean(errs)))
@@ -359,7 +446,7 @@ if __name__ == "__main__":
 
             print('='*10)
             print("[Testing precompute_freqs_cis]")
-            errs = test_precompute_freqs_cis(ModelArgs(), atol=1000.0)
+            errs = test_precompute_freqs_cis(ModelArgs(), atol=1e-2)
             print("[Passed]")
             print("Max precompute_freqs_cis error: %f" % (np.max(errs)))
             print("Mean precompute_freqs_cis error: %f" % (np.mean(errs)))
@@ -368,7 +455,7 @@ if __name__ == "__main__":
 
             print('='*10)
             print("[Testing apply_rotary_emb]")
-            errs0, errs1 = test_apply_roary_emb(ModelArgs(), 128, atol=1000.0)
+            errs0, errs1 = test_apply_roary_emb(ModelArgs(), 128, atol=1e-2)
             print("[Passed]")
             print("Max apply_rotary_emb error: %f, %f" % (np.max(errs0), np.max(errs1)))
             print("Mean apply_rotary_emb error: %f, %f" % (np.mean(errs0), np.mean(errs1)))
@@ -377,7 +464,7 @@ if __name__ == "__main__":
 
             print('='*10)
             print("[Testing Attention]")
-            errs = test_Attention(ModelArgs(), 128, atol=1000.0)
+            errs = test_Attention(ModelArgs(), 128, atol=1e-2)
             print("[Passed]")
             print("Max Attention error: %f" % (np.max(errs)))
             print("Mean Attention error: %f" % (np.mean(errs)))
@@ -386,7 +473,7 @@ if __name__ == "__main__":
 
             print('='*10)
             print("[Testing FeedForward]")
-            errs = test_feedForward(ModelArgs(), 128, atol=1000.0)
+            errs = test_feedForward(ModelArgs(), 128, atol=1e-2)
             print("[Passed]")
             print("Max FeedForward error: %f" % (np.max(errs)))
             print("Mean FeedForward error: %f" % (np.mean(errs)))
@@ -395,7 +482,7 @@ if __name__ == "__main__":
 
             print('='*10)
             print("[Testing TransformerBlock]")
-            errs = test_TransformerBlock(ModelArgs(), 128, atol=1000.0)
+            errs = test_TransformerBlock(ModelArgs(), 128, atol=1e-2)
             print("[Passed]")
             print("Max TransformerBlock error: %f" % (np.max(errs)))
             print("Mean TransformerBlock error: %f" % (np.mean(errs)))
@@ -404,9 +491,59 @@ if __name__ == "__main__":
 
             print('='*10)
             print("[Testing Transformer]")
-            errs = test_Transformer(ModelArgs(), 128, atol=1000.0)
+            errs = test_Transformer(ModelArgs(), 128, atol=1e-2)
             print("[Passed]")
             print("Max Transformer error: %f" % (np.max(errs)))
             print("Mean Transformer error: %f" % (np.mean(errs)))
             print("Median Transformer error: %f" % (np.median(errs)))
             print('='*10)
+
+        print('='*10)
+        print("[Testing Tokenizer]")
+        test_Tokenizer(
+            tokenizer_path, 
+            [
+                "The capital of Germany is the city of", 
+                "Here is my sonnet in the style of Shakespeare about an artificial intelligence:", 
+            ], 
+        )
+        print("[Passed]")
+        print('='*10)
+        
+        print('='*10)
+        print("[Testing ModelLogits]")
+        errs = test_ModelLogits(
+            ckpt_dir, 
+            tokenizer_path, 
+            local_rank, 
+            world_size, 
+            [
+                "The capital of Germany is the city of", 
+                "Here is my sonnet in the style of Shakespeare about an artificial intelligence:", 
+            ], 
+            atol=1e-1, 
+        )
+        print("[Passed]")
+        print("Max ModelLogits error: %f" % (np.max(errs)))
+        print("Mean ModelLogits error: %f" % (np.mean(errs)))
+        print("Median ModelLogits error: %f" % (np.median(errs)))
+        print('='*10)
+
+        print('='*10)
+        print("[Testing ModelGenerations]")
+        test_ModelGenerations(
+            ckpt_dir, 
+            tokenizer_path, 
+            local_rank, 
+            world_size, 
+            [
+                "The capital of Germany is the city of", 
+                "The translation of \"hello world\" to Spanish is", 
+            ], 
+            gen_len=32, 
+        )
+        print("[Passed]")
+        print('='*10)
+
+if __name__ == "__main__":
+    fire.Fire(main)

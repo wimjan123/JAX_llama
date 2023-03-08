@@ -1,4 +1,6 @@
-torch
-fairscale
 fire
 sentencepiece
+jax
+flax
+jaxtyping
+transformers

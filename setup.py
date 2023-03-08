@@ -3,4 +3,4 @@
 
 from setuptools import setup, find_packages
 
-setup(name="llama", version="0.0.0", packages=find_packages())
+setup(name="jax_llama", version="0.0.0", packages=find_packages())

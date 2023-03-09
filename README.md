@@ -45,3 +45,4 @@ The provided `jax_test.py` script runs a comparison between this jax model and t
 ```
 torchrun --nproc_per_node MP jax_test.py --ckpt_dir $TARGET_FOLDER/model_size --tokenizer_path $TARGET_FOLDER/tokenizer.model
 ```
+*(Note: some of the tests only run when MP=1)*

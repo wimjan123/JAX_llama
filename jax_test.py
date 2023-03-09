@@ -6,7 +6,7 @@ from llama import model
 import torch
 import numpy as np
 from fairscale.nn.model_parallel.initialize import initialize_model_parallel
-from typing import Tuple, List, Tuple
+from typing import Tuple, List, Tuple, Optional
 import os
 from flax.core.frozen_dict import freeze
 from dataclasses import dataclass
@@ -357,43 +357,46 @@ def test_Tokenizer(tokenizer_path: str, test_strs: List[str]) -> None:
         assert jax_tokens == torch_tokens, f"Tokenizer test failed for string: {str_}"
         assert jax_tokenizer.decode(jax_tokens) == torch_tokenizer.decode(torch_tokens), f"Tokenizer test failed for string: {str_}"
 
-def test_ModelLogits(ckpt_dir: str, tokenizer_path: str, local_rank: int, world_size: int, test_strs: List[str], atol: float) -> float:
+def test_ModelLogits(ckpt_dir: str, tokenizer_path: str, local_rank: int, world_size: int, test_strs: List[str], atol: float) -> Optional[float]:
     assert torch.cuda.is_available(), "CUDA is not available."
     assert jax.lib.xla_bridge.get_backend().platform == "gpu"
 
     # load jax model
-    jax_generator = jax_load(ckpt_dir, tokenizer_path, precision='highest')
-    jax_model, jax_params = jax_generator.model, jax_generator.params
-    tokenizer, mesh = jax_generator.tokenizer, jax_generator.mesh
-    tokens = [tokenizer.encode(x) for x in test_strs]
+    if local_rank == 0:
+        jax_generator = jax_load(ckpt_dir, tokenizer_path, precision='highest')
+        jax_model, jax_params = jax_generator.model, jax_generator.params
+        tokenizer, mesh = jax_generator.tokenizer, jax_generator.mesh
+        tokens = [tokenizer.encode(x) for x in test_strs]
 
-    # jit model call
-    @jax.jit
-    def get_logits(params: jnp.ndarray, tokens: jnp.ndarray) -> jnp.ndarray:
-        tokens = with_named_sharding_constraint(tokens, mesh, P("dp", None))
+        # jit model call
+        @jax.jit
+        def get_logits(params: jnp.ndarray, tokens: jnp.ndarray) -> jnp.ndarray:
+            tokens = with_named_sharding_constraint(tokens, mesh, P("dp", None))
 
-        logits = jax_model(
-            in_array, 
-            params=params, 
-        ).logits[:, -1, :]
+            logits = jax_model(
+                in_array, 
+                params=params, 
+            ).logits[:, -1, :]
 
-        logits = with_named_sharding_constraint(logits, mesh, P("dp", None))
-        return logits
+            logits = with_named_sharding_constraint(logits, mesh, P("dp", None))
+            return logits
 
-    # get logits
-    jax_logits = []
-    for k in range(len(tokens)):
-        in_array = jnp.asarray(tokens[k][:jax_model.config.max_sequence_length])[None]
-        jax_logits.append(get_logits(jax_params, in_array))
-    jax_logits = np.asarray(jnp.concatenate(jax_logits, axis=0))
-    # unload jax model
-    max_seq_len = jax_model.config.max_sequence_length
-    del jax_model
-    del jax_params
-    del get_logits
+        # get logits
+        jax_logits = []
+        for k in range(len(tokens)):
+            in_array = jnp.asarray(tokens[k][:jax_model.config.max_sequence_length])[None]
+            jax_logits.append(get_logits(jax_params, in_array))
+        jax_logits = np.asarray(jnp.concatenate(jax_logits, axis=0))
+        # unload jax model
+        del jax_model
+        del jax_params
+        del get_logits
+    
+    # wait for jax process
+    torch.distributed.barrier()
     
     # get pytorch logits
-    torch_generator = torch_load(ckpt_dir, tokenizer_path, local_rank, world_size, max_seq_len=max_seq_len, max_batch_size=1)
+    torch_generator = torch_load(ckpt_dir, tokenizer_path, local_rank, world_size, max_seq_len=2048, max_batch_size=1)
     torch_model, tokenizer = torch_generator.model, torch_generator.tokenizer
     tokens = [tokenizer.encode(x, bos=True, eos=False) for x in test_strs]
     torch_logits = []
@@ -405,29 +408,36 @@ def test_ModelLogits(ckpt_dir: str, tokenizer_path: str, local_rank: int, world_
     del torch_generator
     del torch_model
 
-    assert np.allclose(jax_logits, torch_logits, atol=atol), "ModelLogits test failed"
-
-    return np.max(np.abs(jax_logits - torch_logits).reshape(len(test_strs), -1), axis=1)
+    if local_rank == 0:
+        assert np.allclose(jax_logits, torch_logits, atol=atol), "ModelLogits test failed"
+        
+        return np.max(np.abs(jax_logits - torch_logits).reshape(len(test_strs), -1), axis=1)
+    
+    return None
 
 def test_ModelGenerations(ckpt_dir: str, tokenizer_path: str, local_rank: int, world_size: int, test_strs: List[str], gen_len: int=32) -> None:
     assert torch.cuda.is_available(), "CUDA is not available."
     assert jax.lib.xla_bridge.get_backend().platform == "gpu"
     
-    # load jax model
-    jax_generator = jax_load(ckpt_dir, tokenizer_path, precision='highest')
-    jax_strs = jax_generator.generate_from_str(test_strs, max_gen_len=gen_len, temperature=0.0, top_p=1.0)
-    # unload jax model
-    max_seq_len = jax_generator.model.config.max_sequence_length
-    del jax_generator
+    if local_rank == 0:
+        # load jax model
+        jax_generator = jax_load(ckpt_dir, tokenizer_path, precision='highest')
+        jax_strs = jax_generator.generate_from_str(test_strs, max_gen_len=gen_len, temperature=0.0, top_p=1.0)
+        # unload jax model
+        del jax_generator
+    
+    # wait for jax process
+    torch.distributed.barrier()
 
     # get pytorch strs
-    torch_generator = torch_load(ckpt_dir, tokenizer_path, local_rank, world_size, max_seq_len=max_seq_len, max_batch_size=len(test_strs))
+    torch_generator = torch_load(ckpt_dir, tokenizer_path, local_rank, world_size, max_seq_len=2048, max_batch_size=len(test_strs))
     torch_strs = torch_generator.generate(test_strs, max_gen_len=gen_len, temperature=0.0, top_p=1.0)
     # unload pytorch model
     del torch_generator.model
     del torch_generator
 
-    assert all([jax_strs[i] == torch_strs[i] for i in range(len(test_strs))]), "ModelGenerations test failed"
+    if local_rank == 0:
+        assert all([jax_strs[i] == torch_strs[i] for i in range(len(test_strs))]), "ModelGenerations test failed"
 
 def main(ckpt_dir: str, tokenizer_path: str):
     np.random.seed(0)
@@ -435,83 +445,87 @@ def main(ckpt_dir: str, tokenizer_path: str):
 
     with torch.no_grad():
         with jax.default_device(jax.devices('cpu')[0]):
-            print('='*10)
-            print("[Testing RMSNorm]")
-            errs = test_RMSNorm(ModelArgs(), 128, atol=1e-2)
-            print("[Passed]")
-            print("Max RMSNorm error: %f" % (np.max(errs)))
-            print("Mean RMSNorm error: %f" % (np.mean(errs)))
-            print("Median RMSNorm error: %f" % (np.median(errs)))
-            print('='*10)
+            if world_size == 1:
+                print('='*10)
+                print("[Testing RMSNorm]")
+                errs = test_RMSNorm(ModelArgs(), 128, atol=1e-2)
+                print("[Passed]")
+                print("Max RMSNorm error: %f" % (np.max(errs)))
+                print("Mean RMSNorm error: %f" % (np.mean(errs)))
+                print("Median RMSNorm error: %f" % (np.median(errs)))
+                print('='*10)
 
-            print('='*10)
-            print("[Testing precompute_freqs_cis]")
-            errs = test_precompute_freqs_cis(ModelArgs(), atol=1e-2)
-            print("[Passed]")
-            print("Max precompute_freqs_cis error: %f" % (np.max(errs)))
-            print("Mean precompute_freqs_cis error: %f" % (np.mean(errs)))
-            print("Median precompute_freqs_cis error: %f" % (np.median(errs)))
-            print('='*10)
+                print('='*10)
+                print("[Testing precompute_freqs_cis]")
+                errs = test_precompute_freqs_cis(ModelArgs(), atol=1e-2)
+                print("[Passed]")
+                print("Max precompute_freqs_cis error: %f" % (np.max(errs)))
+                print("Mean precompute_freqs_cis error: %f" % (np.mean(errs)))
+                print("Median precompute_freqs_cis error: %f" % (np.median(errs)))
+                print('='*10)
 
-            print('='*10)
-            print("[Testing apply_rotary_emb]")
-            errs0, errs1 = test_apply_roary_emb(ModelArgs(), 128, atol=1e-2)
-            print("[Passed]")
-            print("Max apply_rotary_emb error: %f, %f" % (np.max(errs0), np.max(errs1)))
-            print("Mean apply_rotary_emb error: %f, %f" % (np.mean(errs0), np.mean(errs1)))
-            print("Median apply_rotary_emb error: %f, %f" % (np.median(errs0), np.median(errs1)))
-            print('='*10)
+                print('='*10)
+                print("[Testing apply_rotary_emb]")
+                errs0, errs1 = test_apply_roary_emb(ModelArgs(), 128, atol=1e-2)
+                print("[Passed]")
+                print("Max apply_rotary_emb error: %f, %f" % (np.max(errs0), np.max(errs1)))
+                print("Mean apply_rotary_emb error: %f, %f" % (np.mean(errs0), np.mean(errs1)))
+                print("Median apply_rotary_emb error: %f, %f" % (np.median(errs0), np.median(errs1)))
+                print('='*10)
 
-            print('='*10)
-            print("[Testing Attention]")
-            errs = test_Attention(ModelArgs(), 128, atol=1e-2)
-            print("[Passed]")
-            print("Max Attention error: %f" % (np.max(errs)))
-            print("Mean Attention error: %f" % (np.mean(errs)))
-            print("Median Attention error: %f" % (np.median(errs)))
-            print('='*10)
+                print('='*10)
+                print("[Testing Attention]")
+                errs = test_Attention(ModelArgs(), 128, atol=1e-2)
+                print("[Passed]")
+                print("Max Attention error: %f" % (np.max(errs)))
+                print("Mean Attention error: %f" % (np.mean(errs)))
+                print("Median Attention error: %f" % (np.median(errs)))
+                print('='*10)
 
-            print('='*10)
-            print("[Testing FeedForward]")
-            errs = test_feedForward(ModelArgs(), 128, atol=1e-2)
-            print("[Passed]")
-            print("Max FeedForward error: %f" % (np.max(errs)))
-            print("Mean FeedForward error: %f" % (np.mean(errs)))
-            print("Median FeedForward error: %f" % (np.median(errs)))
-            print('='*10)
+                print('='*10)
+                print("[Testing FeedForward]")
+                errs = test_feedForward(ModelArgs(), 128, atol=1e-2)
+                print("[Passed]")
+                print("Max FeedForward error: %f" % (np.max(errs)))
+                print("Mean FeedForward error: %f" % (np.mean(errs)))
+                print("Median FeedForward error: %f" % (np.median(errs)))
+                print('='*10)
 
-            print('='*10)
-            print("[Testing TransformerBlock]")
-            errs = test_TransformerBlock(ModelArgs(), 128, atol=1e-2)
-            print("[Passed]")
-            print("Max TransformerBlock error: %f" % (np.max(errs)))
-            print("Mean TransformerBlock error: %f" % (np.mean(errs)))
-            print("Median TransformerBlock error: %f" % (np.median(errs)))
-            print('='*10)
+                print('='*10)
+                print("[Testing TransformerBlock]")
+                errs = test_TransformerBlock(ModelArgs(), 128, atol=1e-2)
+                print("[Passed]")
+                print("Max TransformerBlock error: %f" % (np.max(errs)))
+                print("Mean TransformerBlock error: %f" % (np.mean(errs)))
+                print("Median TransformerBlock error: %f" % (np.median(errs)))
+                print('='*10)
 
-            print('='*10)
-            print("[Testing Transformer]")
-            errs = test_Transformer(ModelArgs(), 128, atol=1e-2)
-            print("[Passed]")
-            print("Max Transformer error: %f" % (np.max(errs)))
-            print("Mean Transformer error: %f" % (np.mean(errs)))
-            print("Median Transformer error: %f" % (np.median(errs)))
-            print('='*10)
+                print('='*10)
+                print("[Testing Transformer]")
+                errs = test_Transformer(ModelArgs(), 128, atol=1e-2)
+                print("[Passed]")
+                print("Max Transformer error: %f" % (np.max(errs)))
+                print("Mean Transformer error: %f" % (np.mean(errs)))
+                print("Median Transformer error: %f" % (np.median(errs)))
+                print('='*10)
 
-        print('='*10)
-        print("[Testing Tokenizer]")
-        test_Tokenizer(
-            tokenizer_path, 
-            [
-                "The capital of Germany is the city of", 
-                "Here is my sonnet in the style of Shakespeare about an artificial intelligence:", 
-            ], 
-        )
-        print("[Passed]")
-        print('='*10)
+        if local_rank == 0:
+            print('='*10)
+            print("[Testing Tokenizer]")
+            test_Tokenizer(
+                tokenizer_path, 
+                [
+                    "The capital of Germany is the city of", 
+                    "Here is my sonnet in the style of Shakespeare about an artificial intelligence:", 
+                ], 
+            )
+            print("[Passed]")
+            print('='*10)
         
-        print('='*10)
-        print("[Testing ModelLogits]")
+        if local_rank == 0:
+            print('='*10)
+            print("[Testing ModelLogits]")
+        torch.distributed.barrier()
         errs = test_ModelLogits(
             ckpt_dir, 
             tokenizer_path, 
@@ -523,14 +537,17 @@ def main(ckpt_dir: str, tokenizer_path: str):
             ], 
             atol=1e-1, 
         )
-        print("[Passed]")
-        print("Max ModelLogits error: %f" % (np.max(errs)))
-        print("Mean ModelLogits error: %f" % (np.mean(errs)))
-        print("Median ModelLogits error: %f" % (np.median(errs)))
-        print('='*10)
+        if local_rank == 0:
+            print("[Passed]")
+            print("Max ModelLogits error: %f" % (np.max(errs)))
+            print("Mean ModelLogits error: %f" % (np.mean(errs)))
+            print("Median ModelLogits error: %f" % (np.median(errs)))
+            print('='*10)
 
-        print('='*10)
-        print("[Testing ModelGenerations]")
+        if local_rank == 0:
+            print('='*10)
+            print("[Testing ModelGenerations]")
+        torch.distributed.barrier()
         test_ModelGenerations(
             ckpt_dir, 
             tokenizer_path, 
@@ -542,8 +559,9 @@ def main(ckpt_dir: str, tokenizer_path: str):
             ], 
             gen_len=32, 
         )
-        print("[Passed]")
-        print('='*10)
+        if local_rank == 0:
+            print("[Passed]")
+            print('='*10)
 
 if __name__ == "__main__":
     fire.Fire(main)

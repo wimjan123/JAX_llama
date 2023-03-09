@@ -18,20 +18,10 @@ Once your request is approved, you will receive links to download the tokenizer 
 Edit the `download.sh` script with the signed url provided in the email to download the model weights and tokenizer.
 
 ### Inference
-The provided `jax_example.py` can be run on a single or multi-gpu/tpu node with `torchrun` and will output completions for two pre-defined prompts. Using `TARGET_FOLDER` as defined in `download.sh`:
+The provided `jax_example.py` will output completions for two pre-defined prompts. Using `TARGET_FOLDER` as defined in `download.sh`:
 ```
 python jax_example.py --ckpt_dir $TARGET_FOLDER/model_size --tokenizer_path $TARGET_FOLDER/tokenizer.model
 ```
-
-Different models require different MP values:
-
-|  Model | MP |
-|--------|----|
-| 7B     | 1  |
-| 13B    | 2  |
-| 33B    | 4  |
-| 65B    | 8  |
-
 
 ### Model Card
 See [MODEL_CARD.md](MODEL_CARD.md)
@@ -46,3 +36,12 @@ The provided `jax_test.py` script runs a comparison between this jax model and t
 torchrun --nproc_per_node MP jax_test.py --ckpt_dir $TARGET_FOLDER/model_size --tokenizer_path $TARGET_FOLDER/tokenizer.model
 ```
 *(Note: some of the tests only run when MP=1)*
+
+Different models require different MP values:
+
+|  Model | MP |
+|--------|----|
+| 7B     | 1  |
+| 13B    | 2  |
+| 33B    | 4  |
+| 65B    | 8  |

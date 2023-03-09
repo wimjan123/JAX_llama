@@ -4,7 +4,7 @@ This repository is a Huggingface compatible port of [LLaMA](https://ai.facebook.
 In order to download the checkpoints and tokenizer for LLaMA, fill this [google form](https://forms.gle/jk851eBVbX1m5TAv5)
 
 ### Setup
-In a conda env with pytorch / cuda available, run
+In a conda env, run
 ```
 pip install -r requirements.txt
 ```
